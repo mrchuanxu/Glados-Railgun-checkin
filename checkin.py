@@ -1,12 +1,32 @@
-import requests
-import json
 import os
-import logging
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
-from pypushdeer import PushDeer
+
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
+try:
+    from pypushdeer import PushDeer
+except ModuleNotFoundError:
+    PushDeer = None
+
+from exchange_policy import (
+    record_checkin,
+    reset_after_exchange,
+    schedule_retry,
+    select_exchange_plan,
+    should_attempt_exchange,
+)
 from logging_config import init_logger
+from state_store import StateStore
+
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class CheckinStatus(Enum):
@@ -17,12 +37,10 @@ class CheckinStatus(Enum):
     FAILURE = -2
 
 
-class ExchangePlan(Enum):
-    """兑换计划"""
-
-    PLAN100 = "plan100"
-    PLAN200 = "plan200"
-    PLAN500 = "plan500"
+@dataclass(frozen=True)
+class ExchangeResult:
+    success: bool
+    message: str
 
 
 class APIEndpoint(Enum):
@@ -75,8 +93,8 @@ def log_method(func):
             DEFAULT_ERRORS = {
                 "checkin": {"status": "签到失败", "points": "0", "message": ""},
                 "get_status": ("None 天", -2),
-                "get_points": ("None 积分", 0),
-                "exchange": "",
+                "get_points": ("None 积分", None),
+                "exchange": ExchangeResult(False, "兑换失败"),
             }
 
             if method_name in DEFAULT_ERRORS:
@@ -96,11 +114,16 @@ class Config:
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_COOKIES = "GLADOS_COOKIES"
-    ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+    ENV_EXCHANGE_INTERVAL_DAYS = "GLADOS_EXCHANGE_INTERVAL_DAYS"
     ENV_VERBOSE = "GLADOS_VERBOSE"
+    ENV_STATE_FILE = "GLADOS_STATE_FILE"
 
-    """默认兑换计划"""
-    DEFAULT_EXCHANGE_PLAN = "plan500"
+    """兑换周期"""
+    DEFAULT_EXCHANGE_INTERVAL_DAYS = 30
+    VALID_EXCHANGE_INTERVAL_DAYS = {20, 30, 50}
+
+    """默认状态文件"""
+    DEFAULT_STATE_FILE = ".state/checkin-state.json"
 
     """默认是否输出详细响应"""
     DEFAULT_VERBOSE = False
@@ -108,17 +131,11 @@ class Config:
     """默认域名"""
     DOMAINS = ["glados.cloud", "railgun.info"]
 
-    """兑换计划列表"""
-    EXCHANGE_PLANS = {
-        ExchangePlan.PLAN100.value: 100,
-        ExchangePlan.PLAN200.value: 200,
-        ExchangePlan.PLAN500.value: 500,
-    }
-
     def __init__(self):
         self.push_key: str = ""
         self.cookies_list: List[str] = []
-        self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
+        self.exchange_interval_days: int = self.DEFAULT_EXCHANGE_INTERVAL_DAYS
+        self.state_file: str = self.DEFAULT_STATE_FILE
         self.verbose: bool = self.DEFAULT_VERBOSE
         self._load_config()
 
@@ -126,8 +143,9 @@ class Config:
         """加载配置"""
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
-        exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
+        exchange_interval_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_INTERVAL_DAYS)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
+        state_file_env: Optional[str] = os.environ.get(self.ENV_STATE_FILE)
 
         if not push_key_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_PUSH_KEY}' 未设置。")
@@ -143,20 +161,30 @@ class Config:
             if not self.cookies_list:
                 raise ValueError(f"环境变量 '{self.ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。")
 
-        if not exchange_plan_env:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
-            self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
-        else:
-            if exchange_plan_env in self.EXCHANGE_PLANS:
-                self.exchange_plan = exchange_plan_env
-                logger.info(f"{LogEmoji.SUCCESS} 使用指定的兑换计划: {self.exchange_plan}")
+        if exchange_interval_env:
+            try:
+                configured_interval = int(exchange_interval_env)
+            except ValueError:
+                configured_interval = -1
+            if configured_interval in self.VALID_EXCHANGE_INTERVAL_DAYS:
+                self.exchange_interval_days = configured_interval
             else:
-                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
-                self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
+                logger.warning(
+                    f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_INTERVAL_DAYS}' 的值 "
+                    f"'{exchange_interval_env}' 无效，将使用默认值 {self.DEFAULT_EXCHANGE_INTERVAL_DAYS}。"
+                )
+        else:
+            logger.info(
+                f"{LogEmoji.INFO} 环境变量 '{self.ENV_EXCHANGE_INTERVAL_DAYS}' 未设置，"
+                f"使用默认值 {self.DEFAULT_EXCHANGE_INTERVAL_DAYS}。"
+            )
+
+        if state_file_env:
+            self.state_file = state_file_env
 
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_INTERVAL_DAYS}: {self.exchange_interval_days}。")
 
         if verbose_env is not None:
             verbose_env_lower = verbose_env.lower()
@@ -179,6 +207,8 @@ class API:
     EXCHANGE_URL = APIEndpoint.EXCHANGE.value
 
     def __init__(self, domain: str, cookie_index: int = 0, verbose: bool = False):
+        if requests is None:
+            raise RuntimeError("缺少 requests 依赖，请先安装 requests")
         self.domain: str = domain
         self.cookie_index: int = cookie_index
         self.verbose: bool = verbose
@@ -231,7 +261,7 @@ class API:
         """获取完整 URL"""
         return f"https://{self.domain}{path}"
 
-    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "") -> Optional[requests.Response]:
+    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "") -> Optional[Any]:
         """发送 HTTP 请求"""
         session_headers = self.headers.copy()
         session_headers["cookie"] = cookies
@@ -327,7 +357,7 @@ class API:
             return "None 天", -2
 
     @log_method
-    def get_points(self, cookies: str) -> Tuple[str, int]:
+    def get_points(self, cookies: str) -> Tuple[str, Optional[Decimal]]:
         """获取积分"""
         url = self._get_full_url(self.POINTS_URL)
         response = self._make_request(url, "GET", cookies=cookies)
@@ -337,21 +367,28 @@ class API:
             code = data.get("code", -2)
             points = data.get("points", None)
 
-            if points is not None:
-                points_int = int(float(points))
-                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points_int} 积分}}")
-                points_str = f"{points_int} 积分"
-                points_num = points_int
+            if code == 0 and points is not None:
+                try:
+                    points_num = Decimal(str(points))
+                except (InvalidOperation, ValueError):
+                    self._log("warning", LogEmoji.WARNING, f"无法解析积分: {points}", force=True)
+                    return "None 积分", None
+                if not points_num.is_finite():
+                    self._log("warning", LogEmoji.WARNING, f"积分不是有限数值: {points}", force=True)
+                    return "None 积分", None
+                points_text = format(points_num.normalize(), "f")
+                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points_text} 积分}}")
+                points_str = f"{points_text} 积分"
                 return points_str, points_num
             else:
                 self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}", force=True)
-                return "None 积分", 0
+                return "None 积分", None
         else:
             self._log("warning", LogEmoji.WARNING, "获取积分失败", force=True)
-            return "None 积分", 0
+            return "None 积分", None
 
     @log_method
-    def exchange(self, cookies: str, plan: str, required_points: int) -> str:
+    def exchange(self, cookies: str, plan: str) -> ExchangeResult:
         """执行兑换"""
         url = self._get_full_url(self.EXCHANGE_URL)
         response = self._make_request(url, "POST", {"planType": plan}, cookies)
@@ -363,13 +400,13 @@ class API:
 
             if code == 0:
                 self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, message : {message} }}")
-                return f"兑换成功: {plan}"
+                return ExchangeResult(True, f"兑换成功: {plan}")
             else:
                 self._log("info", LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
-                return f"兑换失败: {message}"
+                return ExchangeResult(False, f"兑换失败: {message}")
         else:
             self._log("warning", LogEmoji.WARNING, "兑换失败", force=True)
-            return "兑换失败"
+            return ExchangeResult(False, "兑换失败")
 
 
 @dataclass()
@@ -383,9 +420,12 @@ class CheckinResult:
     days: str = "None"
     points_total: str = "None"
     exchange: str = "未兑换"
+    valid_days: int = 0
+    exchange_due: bool = False
+    next_exchange_date: Optional[str] = None
     code: CheckinStatus = CheckinStatus.FAILURE  # 0: 成功, 1: 重复, -2: 失败
 
-    def to_dict(self) -> Dict[str, Union[str, CheckinStatus]]:
+    def to_dict(self) -> Dict[str, Any]:
         result_dict = asdict(self)
         return result_dict
 
@@ -402,6 +442,10 @@ class PushService:
             logger.info(f"{LogEmoji.WARNING} 未设置推送密钥，跳过推送通知。")
             return False
 
+        if PushDeer is None:
+            logger.error(f"{LogEmoji.ERROR} 缺少 pypushdeer 依赖，无法发送通知。")
+            return False
+
         try:
             pushdeer = PushDeer(pushkey=self.config.push_key)
             pushdeer.send_text(title, desp=content)
@@ -415,8 +459,10 @@ class PushService:
 class Checker:
     """签到"""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, state_store: StateStore, today: Optional[date] = None):
         self.config = config
+        self.state_store = state_store
+        self.today = today or datetime.now(BEIJING_TZ).date()
         self.results = []
 
     def _log(self, cookie_idx: int, domain: str, emoji: str, message: str, force: bool = False) -> None:
@@ -452,13 +498,25 @@ class Checker:
                 else:
                     self._log(cookie_idx, domain, LogEmoji.WARNING, result_message, force=True)
 
+        self.state_store.mark_complete(self.today)
+
     def _checkin_on_domain(self, cookie: str, cookie_idx: int, domain: str) -> CheckinResult:
         result = CheckinResult(cookie_idx, domain)
+        task_id = self.state_store.task_id(cookie, domain)
+        task = self.state_store.get_task(task_id, domain)
+
+        if task.get("last_attempt_date") == self.today.isoformat():
+            result.status = "今日已处理"
+            result.code = CheckinStatus.REPEAT
+            result.valid_days = task["valid_days"]
+            result.exchange_due = task["exchange_due"]
+            result.next_exchange_date = task.get("next_exchange_date")
+            return result
 
         with API(domain, cookie_idx, verbose=self.config.verbose) as api:
             # 1. 获取状态
             self._log(cookie_idx, domain, LogEmoji.STATUS, "查询剩余天数")
-            days_str, status_code = api.get_status(cookie)
+            days_str, _status_code = api.get_status(cookie)
             result.days = days_str
 
             # 2. 签到
@@ -472,19 +530,41 @@ class Checker:
             points_str, points_num = api.get_points(cookie)
             result.points_total = points_str
 
-            # 4. 执行兑换
-            required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
-            self._log(
-                cookie_idx,
-                domain,
-                LogEmoji.EXCHANGE,
-                f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
-            )
-            result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+            # 4. 更新周期并按需兑换
+            is_valid_checkin = result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
+            record_checkin(task, is_valid_checkin, self.config.exchange_interval_days)
+
+            if should_attempt_exchange(task, self.today):
+                if points_num is None:
+                    result.exchange = "积分查询失败，5 天后重试"
+                    schedule_retry(task, self.today)
+                else:
+                    plan = select_exchange_plan(points_num)
+                    if plan is None:
+                        result.exchange = "积分不足 100，5 天后重试"
+                        schedule_retry(task, self.today)
+                    else:
+                        self._log(cookie_idx, domain, LogEmoji.EXCHANGE, f"积分 {points_num}，开始兑换 {plan}")
+                        exchange_result = api.exchange(cookie, plan)
+                        result.exchange = exchange_result.message
+                        if exchange_result.success:
+                            reset_after_exchange(task, self.today)
+                        else:
+                            schedule_retry(task, self.today)
+            elif task["exchange_due"]:
+                result.exchange = f"等待至 {task['next_exchange_date']} 重试"
+            else:
+                result.exchange = f"未到兑换周期 ({task['valid_days']}/{self.config.exchange_interval_days})"
+
+        task["last_attempt_date"] = self.today.isoformat()
+        self.state_store.update_task(task_id, task)
+        result.valid_days = task["valid_days"]
+        result.exchange_due = task["exchange_due"]
+        result.next_exchange_date = task.get("next_exchange_date")
 
         return result
 
-    def get_results(self) -> List[Dict[str, str]]:
+    def get_results(self) -> List[Dict[str, Any]]:
         """获取所有结果"""
         return [result.to_dict() for result in self.results]
 
@@ -501,7 +581,11 @@ class Checker:
         send_content_lines = []
         log_content_lines = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
+            line = (
+                f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} "
+                f"周期:{res['valid_days']}/{self.config.exchange_interval_days} | "
+                f"{res['status']} | {res['exchange']}"
+            )
             send_content_lines.append(line)
 
             if self.config.verbose:
@@ -521,18 +605,23 @@ logger = init_logger()
 
 def main():
     """主函数"""
+    config = None
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
         config = Config()
+        state_store = StateStore(config.state_file)
+        if state_store.warning:
+            logger.warning(f"{LogEmoji.WARNING} {state_store.warning}")
 
         if not config.cookies_list:
             logger.error(f"{LogEmoji.ERROR} 未找到有效的 Cookie, 退出程序。")
             title, content = "# 未找到 cookies!", ""
+            state_store.mark_complete(datetime.now(BEIJING_TZ).date())
         else:
             # 2. 执行签到
             logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
-            checker = Checker(config)
+            checker = Checker(config, state_store)
             checker.checkin_all()
 
             # 3. 格式化结果
@@ -546,8 +635,9 @@ def main():
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else "")
-    push_service.send(title, content)
+    if config is not None:
+        push_service = PushService(config)
+        push_service.send(title, content)
     logger.info(f"{LogEmoji.END} 签到完成")
 
 

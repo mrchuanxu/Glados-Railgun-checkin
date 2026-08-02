@@ -20,6 +20,9 @@ Thumbs.db
 logs
 *.log
 
+# Runtime state
+.state/
+
 # Build
 build/
 dist/
