@@ -41,13 +41,11 @@ jobs:
         restore-keys: |
           glados-state-
 
-    - name: Check daily random gate
+    - name: Check daily completion gate
       id: gate
       run: |
         mkdir -p .state
         python schedule_gate.py \
-          --event-name "${{ github.event_name }}" \
-          --repository "${{ github.repository }}" \
           --state-file ".state/checkin-state.json" \
           --github-output "$GITHUB_OUTPUT"
 

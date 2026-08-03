@@ -1,46 +1,51 @@
+import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from pathlib import Path
 
-from schedule_gate import BEIJING_TZ, daily_target, decide
+from schedule_gate import BEIJING_TZ, GateDecision, decide, write_github_output
 
 
 class ScheduleGateTests(unittest.TestCase):
     def setUp(self):
         self.noon = datetime(2026, 8, 2, 12, 0, tzinfo=BEIJING_TZ)
 
-    def test_target_is_stable_and_inside_window(self):
-        first = daily_target("owner/repository", self.noon)
-        second = daily_target("owner/repository", self.noon + timedelta(hours=2))
+    def test_incomplete_day_runs_immediately(self):
+        decision = decide(self.noon, None)
 
-        self.assertEqual(first, second)
-        self.assertGreaterEqual((first.hour, first.minute), (12, 0))
-        self.assertLessEqual((first.hour, first.minute), (17, 45))
-        self.assertEqual(first.minute % 15, 0)
+        self.assertTrue(decision.should_run)
+        self.assertEqual(decision.beijing_date, "2026-08-02")
 
-    def test_scheduled_run_waits_until_target(self):
-        target = daily_target("owner/repository", self.noon)
+    def test_yesterday_completion_runs_immediately(self):
+        decision = decide(self.noon, "2026-08-01")
 
-        before = decide(target - timedelta(minutes=1), "schedule", "owner/repository", None)
-        at_target = decide(target, "schedule", "owner/repository", None)
-
-        self.assertFalse(before.should_run)
-        self.assertTrue(at_target.should_run)
+        self.assertTrue(decision.should_run)
 
     def test_completed_day_never_runs_again(self):
         decision = decide(
             self.noon.astimezone(timezone.utc),
-            "workflow_dispatch",
-            "owner/repository",
             "2026-08-02",
         )
 
         self.assertFalse(decision.should_run)
 
-    def test_manual_run_bypasses_target_time(self):
-        early = datetime(2026, 8, 2, 8, 0, tzinfo=BEIJING_TZ)
-        decision = decide(early, "workflow_dispatch", "owner/repository", None)
+    def test_beijing_date_is_used_near_utc_boundary(self):
+        utc_time = datetime(2026, 8, 2, 16, 30, tzinfo=timezone.utc)
+        decision = decide(utc_time, "2026-08-02")
 
         self.assertTrue(decision.should_run)
+        self.assertEqual(decision.beijing_date, "2026-08-03")
+
+    def test_github_output_has_no_random_target(self):
+        decision = GateDecision(True, "今天尚未完成，立即执行", "2026-08-02")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output"
+            write_github_output(str(path), decision)
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("should_run=true", content)
+        self.assertIn("beijing_date=2026-08-02", content)
+        self.assertNotIn("target_time", content)
 
 
 if __name__ == "__main__":
