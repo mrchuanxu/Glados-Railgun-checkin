@@ -3,10 +3,10 @@ name: auto check
 on:
   workflow_dispatch:
   schedule:
-    # UTC 04:00-09:45 = 北京时间 12:00-17:45
-    - cron: '*/15 4-9 * * *'
-    # 北京时间 18:00 的兜底触发
-    - cron: '0 10 * * *'
+    # UTC 04:00-07:45 = 北京时间 12:00-15:45
+    - cron: '*/15 4-7 * * *'
+    # 北京时间 16:00 的最后一次触发
+    - cron: '0 8 * * *'
 
 concurrency:
   group: glados-checkin
