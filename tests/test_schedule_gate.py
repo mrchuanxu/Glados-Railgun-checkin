@@ -21,6 +21,13 @@ class ScheduleGateTests(unittest.TestCase):
 
         self.assertTrue(decision.should_run)
 
+    def test_delayed_run_outside_planned_window_is_allowed(self):
+        delayed = datetime(2026, 8, 3, 3, 0, tzinfo=BEIJING_TZ)
+        decision = decide(delayed, "2026-08-02")
+
+        self.assertTrue(decision.should_run)
+        self.assertEqual(decision.beijing_date, "2026-08-03")
+
     def test_completed_day_never_runs_again(self):
         decision = decide(
             self.noon.astimezone(timezone.utc),
