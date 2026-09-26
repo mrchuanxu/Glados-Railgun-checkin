@@ -749,13 +749,13 @@ Run: `git diff --check`
 
 Expected: exits 0 with no output.
 
-Run:
+Manually review the current implementation and documentation diff for accidental hard-coded credentials:
 
 ```bash
-git diff --no-ext-diff -U0 HEAD -- README.md ehigh_checkin.py .github/workflows/ehighCheck.yml | grep -nE "^\+[^+].*['\"][A-Za-z0-9+/=_-]{24,}['\"]"
+git diff -- README.md ehigh_checkin.py .github/workflows/ehighCheck.yml tests/test_ehigh_checkin.py tests/test_ehigh_workflow.py
 ```
 
-Expected: exits 1 with no matches. Review any match as a possible hard-coded Token, signature, Cookie, request body, or other protocol value; use obvious short placeholders in tests and examples instead of real captured data.
+Expected: inspect every added or changed line and confirm it contains no captured Token, signature, Cookie, request body, or other credential value. Use obvious short placeholders in tests and examples. This manual current-diff review is not a comprehensive secret scanner or Git history audit.
 
 - [ ] **Step 5: Review the final diff and commit documentation**
 
@@ -817,7 +817,7 @@ Expected: workflow exits 0, then the one-hai App shows the same Beijing date as 
 - Complete Secret set: Tasks 1 and 4 cover Token, AppIdentity, both authorization fields, nonce, request root ID, body, and optional Cookie.
 - Exact replay: Task 2 asserts the original body bytes, fixed metadata, headers, timeout, and optional Cookie behavior.
 - Safe outcome semantics: Task 3 accepts only 2xx + object JSON + non-empty string `Result`, logs “服务端接受” rather than business success, and returns nonzero for every defined failure.
-- Secret safety: Tasks 3-5 test log redaction, minimal Secret scope, no response ciphertext logging, and repository credential scans.
+- Secret safety: Tasks 3-5 provide targeted log-redaction tests, Secret scoping tests, no response ciphertext logging, and manual diff review.
 - Schedule: Task 4 fixes the daily cron to Beijing 09:17 and keeps manual dispatch without adding state Cache or retries.
 - Documentation/operations: Task 5 documents capture, setup, first manual verification, optional Cookie, whole-request rotation, and known replay limitations.
 - Verification: Task 6 runs all offline tests, parses both workflows, checks isolation, and defines the credential-rotation gate before the sole live verification.
