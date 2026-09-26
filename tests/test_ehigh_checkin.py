@@ -1,7 +1,9 @@
+import hashlib
 import unittest
 from dataclasses import FrozenInstanceError
+from unittest.mock import Mock
 
-from ehigh_checkin import ConfigError, EhiConfig
+from ehigh_checkin import ConfigError, EhiConfig, perform_checkin
 
 
 VALID_ENV = {
@@ -67,6 +69,59 @@ class EhiConfigTests(unittest.TestCase):
 
         with self.assertRaises(FrozenInstanceError):
             config.token = "replacement"
+
+
+class EhiRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.config = EhiConfig.from_env(VALID_ENV)
+        self.session = Mock()
+        self.response = Mock(status_code=200)
+        self.response.json.return_value = {"Result": "encrypted-response"}
+        self.session.post.return_value = self.response
+
+    def test_posts_original_body_and_protocol_headers_without_cookie(self):
+        perform_checkin(self.config, self.session)
+
+        self.session.post.assert_called_once_with(
+            "https://app.1hai.cn/SignCenter/UserAssets/SignIn",
+            headers={
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+                "Accept-Language": "zh-CN,zh-Hans;q=0.9",
+                "AppVersion": "7431",
+                "AppPlatform": "iPhone",
+                "User-Agent": "%E4%B8%80%E5%97%A8%E7%A7%9F%E8%BD%A6/2904 CFNetwork/3860.700.2 Darwin/25.6.0",
+                "Authorization": "fake-authorization",
+                "ehiContent-MD5": "fake-content-md5",
+                "noncestr": "fake-nonce",
+                "x-ms-request-root-id": "fake-root-id",
+                "Token": "fake-token",
+                "AppIdentity": "fake-app-identity",
+            },
+            data=b"fake$request/body*",
+            timeout=(10, 30),
+        )
+
+    def test_adds_cookie_only_when_configured(self):
+        config = EhiConfig.from_env({**VALID_ENV, "EHI_COOKIE": "session=fake-cookie"})
+
+        perform_checkin(config, self.session)
+
+        headers = self.session.post.call_args.kwargs["headers"]
+        self.assertEqual(headers["Cookie"], "session=fake-cookie")
+
+    def test_returns_frozen_safe_metadata_for_accepted_response(self):
+        outcome = perform_checkin(self.config, self.session)
+
+        self.assertEqual(outcome.status_code, 200)
+        self.assertEqual(outcome.result_length, len("encrypted-response"))
+        self.assertEqual(
+            outcome.result_sha256,
+            hashlib.sha256(b"encrypted-response").hexdigest(),
+        )
+        self.assertFalse(hasattr(outcome, "result"))
+        with self.assertRaises(FrozenInstanceError):
+            outcome.status_code = 201
 
 
 if __name__ == "__main__":

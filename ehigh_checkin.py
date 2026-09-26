@@ -1,6 +1,11 @@
+import hashlib
 import os
 from dataclasses import dataclass
-from typing import ClassVar, Mapping
+from typing import Any, ClassVar, Mapping
+
+
+CHECKIN_URL = "https://app.1hai.cn/SignCenter/UserAssets/SignIn"
+USER_AGENT = "%E4%B8%80%E5%97%A8%E7%A7%9F%E8%BD%A6/2904 CFNetwork/3860.700.2 Darwin/25.6.0"
 
 
 class ConfigError(ValueError):
@@ -44,3 +49,45 @@ class EhiConfig:
             request_body=environment["EHI_REQUEST_BODY"],
             cookie=environment.get("EHI_COOKIE") or None,
         )
+
+
+@dataclass(frozen=True)
+class CheckinOutcome:
+    status_code: int
+    result_length: int
+    result_sha256: str
+
+
+def _build_headers(config: EhiConfig) -> dict[str, str]:
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Accept-Language": "zh-CN,zh-Hans;q=0.9",
+        "AppVersion": "7431",
+        "AppPlatform": "iPhone",
+        "User-Agent": USER_AGENT,
+        "Authorization": config.authorization,
+        "ehiContent-MD5": config.content_md5,
+        "noncestr": config.noncestr,
+        "x-ms-request-root-id": config.request_root_id,
+        "Token": config.token,
+        "AppIdentity": config.app_identity,
+    }
+    if config.cookie:
+        headers["Cookie"] = config.cookie
+    return headers
+
+
+def perform_checkin(config: EhiConfig, session: Any) -> CheckinOutcome:
+    response = session.post(
+        CHECKIN_URL,
+        headers=_build_headers(config),
+        data=config.request_body.encode("utf-8"),
+        timeout=(10, 30),
+    )
+    result = response.json()["Result"]
+    return CheckinOutcome(
+        status_code=response.status_code,
+        result_length=len(result),
+        result_sha256=hashlib.sha256(result.encode("utf-8")).hexdigest(),
+    )
