@@ -22,6 +22,7 @@ logs
 
 # Runtime state
 .state/
+.worktrees/
 
 # Build
 build/
