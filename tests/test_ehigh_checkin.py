@@ -1,9 +1,18 @@
 import hashlib
+import json
 import unittest
 from dataclasses import FrozenInstanceError
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from ehigh_checkin import ConfigError, EhiConfig, perform_checkin
+import requests
+
+from ehigh_checkin import (
+    CheckinError,
+    ConfigError,
+    EhiConfig,
+    main,
+    perform_checkin,
+)
 
 
 VALID_ENV = {
@@ -122,6 +131,91 @@ class EhiRequestTests(unittest.TestCase):
         self.assertFalse(hasattr(outcome, "result"))
         with self.assertRaises(FrozenInstanceError):
             outcome.status_code = 201
+
+
+class EhiFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.config = EhiConfig.from_env(VALID_ENV)
+        self.session = Mock()
+        self.response = Mock(status_code=200)
+        self.session.post.return_value = self.response
+
+    def test_rejects_non_2xx_without_parsing_body(self):
+        self.response.status_code = 401
+
+        with self.assertRaisesRegex(CheckinError, "HTTP 状态异常: 401"):
+            perform_checkin(self.config, self.session)
+
+        self.response.json.assert_not_called()
+
+    def test_wraps_network_exception_without_exception_text(self):
+        self.session.post.side_effect = requests.Timeout("fake-token leaked")
+
+        with self.assertRaisesRegex(CheckinError, "网络请求失败: Timeout") as context:
+            perform_checkin(self.config, self.session)
+
+        self.assertNotIn("fake-token", str(context.exception))
+        self.assertNotIn("leaked", str(context.exception))
+
+    def test_rejects_invalid_json(self):
+        self.response.json.side_effect = json.JSONDecodeError("bad", "x", 0)
+
+        with self.assertRaisesRegex(CheckinError, "响应不是有效 JSON"):
+            perform_checkin(self.config, self.session)
+
+    def test_rejects_non_object_json(self):
+        self.response.json.return_value = ["fake-ciphertext"]
+
+        with self.assertRaisesRegex(CheckinError, "响应 JSON 不是对象"):
+            perform_checkin(self.config, self.session)
+
+    def test_rejects_missing_empty_or_non_string_result(self):
+        for payload in ({}, {"Result": ""}, {"Result": 123}):
+            with self.subTest(payload=payload):
+                self.response.json.return_value = payload
+
+                with self.assertRaisesRegex(CheckinError, "响应缺少非空 Result"):
+                    perform_checkin(self.config, self.session)
+
+
+class EhiMainTests(unittest.TestCase):
+    @patch("ehigh_checkin.requests.Session")
+    def test_success_logs_only_safe_response_metadata(self, session_class):
+        ciphertext = "fake-response-ciphertext"
+        response = Mock(status_code=200)
+        response.json.return_value = {"Result": ciphertext}
+        session_class.return_value.__enter__.return_value.post.return_value = response
+
+        with patch.dict("os.environ", VALID_ENV, clear=True):
+            with self.assertLogs("ehigh_checkin", level="INFO") as captured:
+                exit_code = main()
+
+        output = "\n".join(captured.output)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("请求已被服务端接受", output)
+        self.assertIn("HTTP 200", output)
+        self.assertIn(f"Result 长度={len(ciphertext)}", output)
+        self.assertIn(hashlib.sha256(ciphertext.encode()).hexdigest(), output)
+        self.assertIn("业务结果仍需 App 验证", output)
+        for secret in (*VALID_ENV.values(), ciphertext):
+            self.assertNotIn(secret, output)
+
+    @patch("ehigh_checkin.requests.Session")
+    def test_failure_returns_nonzero_and_logs_sanitized_error(self, session_class):
+        session_class.return_value.__enter__.return_value.post.side_effect = (
+            requests.Timeout("fake-token leaked")
+        )
+
+        with patch.dict("os.environ", VALID_ENV, clear=True):
+            with self.assertLogs("ehigh_checkin", level="ERROR") as captured:
+                exit_code = main()
+
+        output = "\n".join(captured.output)
+        self.assertEqual(exit_code, 1)
+        self.assertIn("网络请求失败: Timeout", output)
+        self.assertNotIn("leaked", output)
+        for secret in VALID_ENV.values():
+            self.assertNotIn(secret, output)
 
 
 if __name__ == "__main__":

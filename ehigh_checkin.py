@@ -1,15 +1,24 @@
 import hashlib
+import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping
 
+import requests
+
 
 CHECKIN_URL = "https://app.1hai.cn/SignCenter/UserAssets/SignIn"
 USER_AGENT = "%E4%B8%80%E5%97%A8%E7%A7%9F%E8%BD%A6/2904 CFNetwork/3860.700.2 Darwin/25.6.0"
+logger = logging.getLogger("ehigh_checkin")
 
 
 class ConfigError(ValueError):
     """Raised when required replay configuration is missing."""
+
+
+class CheckinError(RuntimeError):
+    """Raised when a check-in response cannot be safely accepted."""
 
 
 @dataclass(frozen=True)
@@ -79,15 +88,59 @@ def _build_headers(config: EhiConfig) -> dict[str, str]:
 
 
 def perform_checkin(config: EhiConfig, session: Any) -> CheckinOutcome:
-    response = session.post(
-        CHECKIN_URL,
-        headers=_build_headers(config),
-        data=config.request_body.encode("utf-8"),
-        timeout=(10, 30),
-    )
-    result = response.json()["Result"]
+    try:
+        response = session.post(
+            CHECKIN_URL,
+            headers=_build_headers(config),
+            data=config.request_body.encode("utf-8"),
+            timeout=(10, 30),
+        )
+    except requests.RequestException as error:
+        raise CheckinError(f"网络请求失败: {type(error).__name__}") from error
+
+    if not 200 <= response.status_code < 300:
+        raise CheckinError(f"HTTP 状态异常: {response.status_code}")
+
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError) as error:
+        raise CheckinError("响应不是有效 JSON") from error
+
+    if not isinstance(payload, dict):
+        raise CheckinError("响应 JSON 不是对象")
+
+    result = payload.get("Result")
+    if not isinstance(result, str) or not result:
+        raise CheckinError("响应缺少非空 Result")
+
     return CheckinOutcome(
         status_code=response.status_code,
         result_length=len(result),
         result_sha256=hashlib.sha256(result.encode("utf-8")).hexdigest(),
     )
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    try:
+        config = EhiConfig.from_env()
+        with requests.Session() as session:
+            outcome = perform_checkin(config, session)
+    except (ConfigError, CheckinError) as error:
+        logger.error("一嗨签到请求失败: %s", error)
+        return 1
+
+    logger.info(
+        "一嗨签到请求已被服务端接受: HTTP %s, Result 长度=%s, SHA-256=%s；业务结果仍需 App 验证",
+        outcome.status_code,
+        outcome.result_length,
+        outcome.result_sha256,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
