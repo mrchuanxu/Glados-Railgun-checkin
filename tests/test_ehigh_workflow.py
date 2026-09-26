@@ -16,6 +16,34 @@ EXPECTED_SECRETS = {
 }
 
 
+def extract_indented_block(text, header, indent):
+    lines = text.splitlines(keepends=True)
+    header_line = f"{' ' * indent}{header}:"
+    starts = [index for index, line in enumerate(lines) if line.rstrip() == header_line]
+    if len(starts) != 1:
+        raise AssertionError(f"Expected one {header!r} block, found {len(starts)}")
+
+    block = []
+    for line in lines[starts[0] + 1 :]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            line_indent = len(line) - len(line.lstrip(" "))
+            if line_indent <= indent:
+                break
+        block.append(line)
+    return "".join(block)
+
+
+def extract_named_steps(text):
+    matches = list(re.finditer(r"(?m)^    - name: ([^\n]+)\n", text))
+    return {
+        match.group(1): text[
+            match.start() : next_match.start() if next_match else len(text)
+        ]
+        for match, next_match in zip(matches, matches[1:] + [None])
+    }
+
+
 class EhighWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(WORKFLOW_PATH.exists(), f"Missing workflow: {WORKFLOW_PATH}")
@@ -32,13 +60,16 @@ class EhighWorkflowTests(unittest.TestCase):
         self.assertIn("    # UTC 01:17 = 北京时间 09:17\n", self.workflow)
 
     def test_has_restricted_permissions_and_dedicated_concurrency(self):
-        permissions = re.search(
-            r"(?m)^permissions:\s*\n((?:  [^\n]+\n)+)",
-            self.workflow,
-        )
+        permissions = extract_indented_block(self.workflow, "permissions", 0)
+        effective_permissions = [
+            line.rstrip()
+            for line in permissions.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        checkin_job = extract_indented_block(self.workflow, "checkin", 2)
 
-        self.assertIsNotNone(permissions)
-        self.assertEqual(permissions.group(1), "  contents: read\n")
+        self.assertEqual(effective_permissions, ["  contents: read"])
+        self.assertNotRegex(checkin_job, r"(?m)^    permissions:\s*$")
         self.assertRegex(
             self.workflow,
             r"(?ms)^concurrency:\s*\n  group: ehigh-checkin\s*\n"
@@ -73,20 +104,34 @@ class EhighWorkflowTests(unittest.TestCase):
         self.assertIn("      run: python -m pip install requests\n", self.workflow)
 
     def test_only_checkin_step_receives_exact_ehigh_secrets(self):
-        steps = re.split(r"(?m)^\s{4}- name: ", self.workflow)[1:]
-        checkin_steps = [step for step in steps if "python ehigh_checkin.py" in step]
+        checkin_job = extract_indented_block(self.workflow, "checkin", 2)
+        job_env = extract_indented_block(checkin_job, "env", 4)
+        steps = extract_named_steps(self.workflow)
+        self.assertIn("Run 1hai checkin", steps)
 
-        self.assertEqual(len(checkin_steps), 1)
-        checkin_step = checkin_steps[0]
-        env_keys = set(re.findall(r"(?m)^\s{8}([A-Z][A-Z0-9_]*):", checkin_step))
-        secret_refs = re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", self.workflow)
+        checkin_env = extract_indented_block(steps["Run 1hai checkin"], "env", 6)
+        env_lines = [
+            line.rstrip()
+            for line in checkin_env.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        env_entries = [
+            re.fullmatch(r"        ([A-Z][A-Z0-9_]*): (.+)", line)
+            for line in env_lines
+        ]
+        expected_env = {
+            name: "${{ secrets." + name + " }}" for name in EXPECTED_SECRETS
+        }
 
-        self.assertEqual(env_keys, EXPECTED_SECRETS)
-        self.assertEqual(set(secret_refs), EXPECTED_SECRETS)
-        self.assertEqual(len(secret_refs), len(EXPECTED_SECRETS))
-        for step in steps:
-            if step != checkin_step:
-                self.assertNotRegex(step, r"(?m)^\s{6}env:\s*$")
+        self.assertTrue(all(env_entries))
+        self.assertEqual(len(env_entries), len(expected_env))
+        self.assertEqual(
+            {entry.group(1): entry.group(2) for entry in env_entries},
+            expected_env,
+        )
+        self.assertNotIn("secrets.", job_env)
+        for name, step in steps.items():
+            if name != "Run 1hai checkin":
                 self.assertNotIn("secrets.", step)
 
 
