@@ -74,17 +74,55 @@
 
 ![图片加载失败](imgs/4.png)
 
+## 一嗨自动签到（静态重放）
+
+本仓库可独立运行一嗨签到任务。该方案不会生成一嗨客户端的加密参数，而是原样重放一组已经验证可跨日使用的 `SignIn` 请求。它可能在 Token 过期、接口协议变化或服务端增加防重放校验后失效。
+
+### 获取配置
+
+在一嗨 App 中捕获以下请求：
+
+```text
+POST https://app.1hai.cn/SignCenter/UserAssets/SignIn
+```
+
+将同一次请求的字段分别保存为 GitHub Actions repository secrets：
+
+| Secret | 抓包字段 |
+|---|---|
+| `EHI_TOKEN` | 请求头 `Token` |
+| `EHI_APP_IDENTITY` | 请求头 `AppIdentity` |
+| `EHI_AUTHORIZATION` | 请求头 `Authorization` |
+| `EHI_CONTENT_MD5` | 请求头 `ehiContent-MD5` |
+| `EHI_NONCESTR` | 请求头 `noncestr` |
+| `EHI_REQUEST_ROOT_ID` | 请求头 `x-ms-request-root-id` |
+| `EHI_REQUEST_BODY` | 未修改的原始请求体 |
+| `EHI_COOKIE` | 请求头 `Cookie`，可选 |
+
+这些字段必须来自同一次请求，不能只更新其中一部分。不要把真实值写入仓库、Issue 或 Actions 日志。已经公开的凭据应先通过重新登录轮换，再捕获新的整组请求字段用于正式部署。
+
+### 运行与验证
+
+- `.github/workflows/ehighCheck.yml` 计划每天北京时间 09:17 运行，也支持手动执行。
+- 首次配置后先手动运行工作流，再打开一嗨 App 确认当天已签到且积分增加。
+- HTTP 2xx 和非空加密 `Result` 只表示请求被服务端接受。脚本无法解密业务响应，因此这不能证明签到成功或积分到账。
+- 首次测试先不配置 `EHI_COOKIE`；如果人工验证失败，再补充同一次抓包请求的 Cookie。
+- 工作流失败或 App 未显示签到时，重新登录并捕获一组完整的新请求，然后一起更新所有 `EHI_*` Secrets。
+- GitHub Actions 定时任务可能延迟或丢失，重要日期可在 Actions 页面检查运行记录。
+
 ## 文件结构
 
 ```shell
 │  checkin.py	# 签到脚本
+│  ehigh_checkin.py	# 一嗨静态重放签到脚本
 │  exchange_policy.py	# 兑换周期和积分档位规则
 │  schedule_gate.py	# 每日随机执行门控
 │  state_store.py	# 跨工作流状态管理
 │
 ├─.github
 │  └─workflows
-│          gladosCheck.yml	# Actions 配置文件
+│          ehighCheck.yml	# 一嗨签到 Actions 配置
+│          gladosCheck.yml	# GLaDOS/Railgun Actions 配置
 │
 └─tests	# 离线自动化测试
 ```
