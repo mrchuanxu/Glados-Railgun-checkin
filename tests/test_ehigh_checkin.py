@@ -156,6 +156,7 @@ class EhiFailureTests(unittest.TestCase):
 
         self.assertNotIn("fake-token", str(context.exception))
         self.assertNotIn("leaked", str(context.exception))
+        self.assertIsNone(context.exception.__cause__)
 
     def test_rejects_invalid_json(self):
         self.response.json.side_effect = json.JSONDecodeError("bad", "x", 0)
@@ -199,6 +200,8 @@ class EhiMainTests(unittest.TestCase):
         self.assertIn("业务结果仍需 App 验证", output)
         for secret in (*VALID_ENV.values(), ciphertext):
             self.assertNotIn(secret, output)
+        session_class.return_value.__enter__.assert_called_once_with()
+        session_class.return_value.__exit__.assert_called_once_with(None, None, None)
 
     @patch("ehigh_checkin.requests.Session")
     def test_failure_returns_nonzero_and_logs_sanitized_error(self, session_class):
@@ -216,6 +219,8 @@ class EhiMainTests(unittest.TestCase):
         self.assertNotIn("leaked", output)
         for secret in VALID_ENV.values():
             self.assertNotIn(secret, output)
+        session_class.return_value.__enter__.assert_called_once_with()
+        session_class.return_value.__exit__.assert_called_once()
 
 
 if __name__ == "__main__":

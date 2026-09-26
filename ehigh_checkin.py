@@ -96,7 +96,7 @@ def perform_checkin(config: EhiConfig, session: Any) -> CheckinOutcome:
             timeout=(10, 30),
         )
     except requests.RequestException as error:
-        raise CheckinError(f"网络请求失败: {type(error).__name__}") from error
+        raise CheckinError(f"网络请求失败: {type(error).__name__}") from None
 
     if not 200 <= response.status_code < 300:
         raise CheckinError(f"HTTP 状态异常: {response.status_code}")
