@@ -32,10 +32,13 @@ class EhighWorkflowTests(unittest.TestCase):
         self.assertIn("    # UTC 01:17 = 北京时间 09:17\n", self.workflow)
 
     def test_has_restricted_permissions_and_dedicated_concurrency(self):
-        self.assertRegex(
+        permissions = re.search(
+            r"(?m)^permissions:\s*\n((?:  [^\n]+\n)+)",
             self.workflow,
-            r"(?ms)^permissions:\s*\n  contents: read\s*$",
         )
+
+        self.assertIsNotNone(permissions)
+        self.assertEqual(permissions.group(1), "  contents: read\n")
         self.assertRegex(
             self.workflow,
             r"(?ms)^concurrency:\s*\n  group: ehigh-checkin\s*\n"
@@ -50,6 +53,15 @@ class EhighWorkflowTests(unittest.TestCase):
         self.assertNotIn("schedule_gate", self.workflow)
         self.assertNotIn("actions/cache", self.workflow)
         self.assertNotIn("set -x", self.workflow)
+
+    def test_checkout_does_not_persist_credentials(self):
+        self.assertRegex(
+            self.workflow,
+            r"(?m)^    - name: Checkout code\n"
+            r"      uses: actions/checkout@v6\n"
+            r"      with:\n"
+            r"        persist-credentials: false$",
+        )
 
     def test_checkin_job_has_display_name(self):
         self.assertRegex(
