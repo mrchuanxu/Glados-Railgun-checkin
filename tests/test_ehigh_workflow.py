@@ -29,10 +29,7 @@ class EhighWorkflowTests(unittest.TestCase):
             re.findall(r"cron:\s*'([^']+)'", self.workflow),
             ["17 1 * * *"],
         )
-        self.assertRegex(
-            self.workflow,
-            r"(?m)^\s*#.*(?:北京时间|Beijing).*09:17.*$",
-        )
+        self.assertIn("    # UTC 01:17 = 北京时间 09:17\n", self.workflow)
 
     def test_has_restricted_permissions_and_dedicated_concurrency(self):
         self.assertRegex(
@@ -49,11 +46,19 @@ class EhighWorkflowTests(unittest.TestCase):
         self.assertIn("uses: actions/checkout@v6", self.workflow)
         self.assertIn("uses: actions/setup-python@v6", self.workflow)
         self.assertRegex(self.workflow, r"python-version:\s*['\"]?3\.13['\"]?")
-        self.assertIn("pip install requests", self.workflow)
         self.assertNotIn("GLADOS", self.workflow)
         self.assertNotIn("schedule_gate", self.workflow)
         self.assertNotIn("actions/cache", self.workflow)
         self.assertNotIn("set -x", self.workflow)
+
+    def test_checkin_job_has_display_name(self):
+        self.assertRegex(
+            self.workflow,
+            r"(?m)^  checkin:\s*\n    name: 1hai checkin\s*$",
+        )
+
+    def test_installs_requests_with_current_python(self):
+        self.assertIn("      run: python -m pip install requests\n", self.workflow)
 
     def test_only_checkin_step_receives_exact_ehigh_secrets(self):
         steps = re.split(r"(?m)^\s{4}- name: ", self.workflow)[1:]
