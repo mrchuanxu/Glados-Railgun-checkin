@@ -75,6 +75,114 @@ class EhiConfigTests(unittest.TestCase):
 
                 self.assertEqual(str(context.exception), "缺少环境变量: EHI_CONFIG")
 
+    def test_each_missing_key_names_only_the_key(self):
+        for name in VALID_FIELDS:
+            with self.subTest(name=name):
+                fields = {
+                    key: value for key, value in VALID_FIELDS.items() if key != name
+                }
+
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env({"EHI_CONFIG": urlencode(fields)})
+
+                self.assertEqual(str(context.exception), f"缺少配置键: {name}")
+                for value in fields.values():
+                    if value:
+                        self.assertNotIn(value, str(context.exception))
+
+    def test_unknown_key_reports_first_sorted_name_without_value(self):
+        raw_config = urlencode(
+            {
+                **VALID_FIELDS,
+                "z_unknown": "z-sensitive-value",
+                "a_unknown": "a-sensitive-value",
+            }
+        )
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "未知配置键: a_unknown")
+        self.assertNotIn("a-sensitive-value", str(context.exception))
+        self.assertNotIn("z-sensitive-value", str(context.exception))
+
+    def test_duplicate_key_is_rejected_before_other_validation(self):
+        fields = {
+            key: value for key, value in VALID_FIELDS.items() if key != "authorization"
+        }
+        raw_config = (
+            f"{urlencode(fields)}&z_unknown=unknown-sensitive-value"
+            "&token=duplicate-sensitive-value"
+        )
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "重复配置键: token")
+        self.assertNotIn("duplicate-sensitive-value", str(context.exception))
+        self.assertNotIn("unknown-sensitive-value", str(context.exception))
+
+    def test_unknown_key_is_rejected_before_missing_key(self):
+        fields = {
+            key: value for key, value in VALID_FIELDS.items() if key != "authorization"
+        }
+        raw_config = urlencode({**fields, "z_unknown": "unknown-sensitive-value"})
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "未知配置键: z_unknown")
+        self.assertNotIn("unknown-sensitive-value", str(context.exception))
+
+    def test_missing_key_reports_first_sorted_name_before_empty_value(self):
+        fields = {
+            key: value
+            for key, value in VALID_FIELDS.items()
+            if key not in {"authorization", "token"}
+        }
+        fields["request_body"] = ""
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": urlencode(fields)})
+
+        self.assertEqual(str(context.exception), "缺少配置键: authorization")
+
+    def test_each_non_cookie_value_must_be_non_empty(self):
+        for name in EhiConfig.NON_EMPTY_KEYS:
+            with self.subTest(name=name):
+                raw_config = urlencode({**VALID_FIELDS, name: ""})
+
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+                self.assertEqual(str(context.exception), f"配置值不能为空: {name}")
+
+    def test_empty_value_reports_first_sorted_name(self):
+        raw_config = urlencode(
+            {**VALID_FIELDS, "token": "", "authorization": ""}
+        )
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "配置值不能为空: authorization")
+
+    def test_invalid_form_or_encoding_is_rejected_without_raw_value(self):
+        invalid_values = (
+            "token",
+            f"{VALID_CONFIG}&broken=%",
+            f"{VALID_CONFIG}&broken=%ZZ",
+            f"{VALID_CONFIG}&broken=%FF",
+        )
+        for raw_config in invalid_values:
+            with self.subTest(raw_config=raw_config):
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+                self.assertEqual(str(context.exception), "EHI_CONFIG URL 编码无效")
+                self.assertNotIn(raw_config, str(context.exception))
+                self.assertIsNone(context.exception.__cause__)
+
     def test_rejects_malformed_percent_escape_with_sanitized_error(self):
         for malformed in ("%", "%2", "%GG", "%2G"):
             with self.subTest(malformed=malformed):
@@ -199,6 +307,21 @@ class EhiFailureTests(unittest.TestCase):
 
 
 class EhiMainTests(unittest.TestCase):
+    @patch("ehigh_checkin.requests.Session")
+    def test_invalid_duplicate_config_is_not_logged_or_requested(self, session_class):
+        aggregate_secret = f"{VALID_CONFIG}&token=duplicate-sensitive-value"
+
+        with patch.dict("os.environ", {"EHI_CONFIG": aggregate_secret}, clear=True):
+            with self.assertLogs("ehigh_checkin", level="ERROR") as captured:
+                exit_code = main()
+
+        output = "\n".join(captured.output)
+        self.assertEqual(exit_code, 1)
+        self.assertIn("重复配置键: token", output)
+        self.assertNotIn(aggregate_secret, output)
+        self.assertNotIn("duplicate-sensitive-value", output)
+        session_class.assert_not_called()
+
     @patch("ehigh_checkin.requests.Session")
     def test_success_logs_only_safe_response_metadata(self, session_class):
         ciphertext = "fake-response-ciphertext"

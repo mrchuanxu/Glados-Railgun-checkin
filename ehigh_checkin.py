@@ -69,7 +69,27 @@ class EhiConfig:
         except (UnicodeDecodeError, ValueError):
             raise ConfigError("EHI_CONFIG URL 编码无效") from None
 
+        seen = set()
+        for key, _ in pairs:
+            if key in seen:
+                raise ConfigError(f"重复配置键: {key}")
+            seen.add(key)
+
+        unknown_keys = seen - cls.REQUIRED_KEYS
+        if unknown_keys:
+            name = sorted(unknown_keys)[0]
+            raise ConfigError(f"未知配置键: {name}")
+
+        missing_keys = cls.REQUIRED_KEYS - seen
+        if missing_keys:
+            name = sorted(missing_keys)[0]
+            raise ConfigError(f"缺少配置键: {name}")
+
         values = dict(pairs)
+        empty_keys = {name for name in cls.NON_EMPTY_KEYS if not values[name]}
+        if empty_keys:
+            name = sorted(empty_keys)[0]
+            raise ConfigError(f"配置值不能为空: {name}")
 
         return cls(
             token=values["token"],
