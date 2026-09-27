@@ -2,8 +2,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping
+from urllib.parse import parse_qsl
 
 import requests
 
@@ -32,31 +34,52 @@ class EhiConfig:
     request_body: str
     cookie: str | None = None
 
-    REQUIRED_ENV: ClassVar[tuple[str, ...]] = (
-        "EHI_TOKEN",
-        "EHI_APP_IDENTITY",
-        "EHI_AUTHORIZATION",
-        "EHI_CONTENT_MD5",
-        "EHI_NONCESTR",
-        "EHI_REQUEST_ROOT_ID",
-        "EHI_REQUEST_BODY",
+    CONFIG_ENV: ClassVar[str] = "EHI_CONFIG"
+    REQUIRED_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "token",
+            "app_identity",
+            "authorization",
+            "content_md5",
+            "noncestr",
+            "request_root_id",
+            "request_body",
+            "cookie",
+        }
     )
+    NON_EMPTY_KEYS: ClassVar[frozenset[str]] = REQUIRED_KEYS - {"cookie"}
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] = os.environ) -> "EhiConfig":
-        for name in cls.REQUIRED_ENV:
-            if not environment.get(name):
-                raise ConfigError(f"缺少环境变量: {name}")
+        encoded = environment.get(cls.CONFIG_ENV)
+        if not encoded:
+            raise ConfigError(f"缺少环境变量: {cls.CONFIG_ENV}")
+
+        if re.search(r"%(?![0-9A-Fa-f]{2})", encoded):
+            raise ConfigError("EHI_CONFIG URL 编码无效")
+
+        try:
+            pairs = parse_qsl(
+                encoded,
+                keep_blank_values=True,
+                strict_parsing=True,
+                encoding="utf-8",
+                errors="strict",
+            )
+        except (UnicodeDecodeError, ValueError):
+            raise ConfigError("EHI_CONFIG URL 编码无效") from None
+
+        values = dict(pairs)
 
         return cls(
-            token=environment["EHI_TOKEN"],
-            app_identity=environment["EHI_APP_IDENTITY"],
-            authorization=environment["EHI_AUTHORIZATION"],
-            content_md5=environment["EHI_CONTENT_MD5"],
-            noncestr=environment["EHI_NONCESTR"],
-            request_root_id=environment["EHI_REQUEST_ROOT_ID"],
-            request_body=environment["EHI_REQUEST_BODY"],
-            cookie=environment.get("EHI_COOKIE") or None,
+            token=values["token"],
+            app_identity=values["app_identity"],
+            authorization=values["authorization"],
+            content_md5=values["content_md5"],
+            noncestr=values["noncestr"],
+            request_root_id=values["request_root_id"],
+            request_body=values["request_body"],
+            cookie=values["cookie"] or None,
         )
 
 

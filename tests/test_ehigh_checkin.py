@@ -3,6 +3,7 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import Mock, patch
+from urllib.parse import urlencode
 
 import requests
 
@@ -15,19 +16,22 @@ from ehigh_checkin import (
 )
 
 
-VALID_ENV = {
-    "EHI_TOKEN": "fake-token",
-    "EHI_APP_IDENTITY": "fake-app-identity",
-    "EHI_AUTHORIZATION": "fake-authorization",
-    "EHI_CONTENT_MD5": "fake-content-md5",
-    "EHI_NONCESTR": "fake-nonce",
-    "EHI_REQUEST_ROOT_ID": "fake-root-id",
-    "EHI_REQUEST_BODY": "fake$request/body*",
+VALID_FIELDS = {
+    "token": "fake-token",
+    "app_identity": "fake-app-identity",
+    "authorization": "fake-authorization",
+    "content_md5": "fake-content-md5",
+    "noncestr": "fake-nonce",
+    "request_root_id": "fake-root-id",
+    "request_body": "fake$request/body*",
+    "cookie": "",
 }
+VALID_CONFIG = urlencode(VALID_FIELDS)
+VALID_ENV = {"EHI_CONFIG": VALID_CONFIG}
 
 
 class EhiConfigTests(unittest.TestCase):
-    def test_loads_required_values_and_omits_optional_cookie(self):
+    def test_loads_all_values_from_aggregate_config(self):
         config = EhiConfig.from_env(VALID_ENV)
 
         self.assertEqual(config.token, "fake-token")
@@ -39,39 +43,48 @@ class EhiConfigTests(unittest.TestCase):
         self.assertEqual(config.request_body, "fake$request/body*")
         self.assertIsNone(config.cookie)
 
-    def test_preserves_optional_cookie_verbatim(self):
-        environment = {**VALID_ENV, "EHI_COOKIE": "  session=fake; device=test  "}
+    def test_accepts_arbitrary_key_order(self):
+        environment = {
+            "EHI_CONFIG": urlencode(tuple(reversed(tuple(VALID_FIELDS.items()))))
+        }
 
-        self.assertEqual(
-            EhiConfig.from_env(environment).cookie,
-            "  session=fake; device=test  ",
-        )
+        self.assertEqual(EhiConfig.from_env(environment).token, "fake-token")
+
+    def test_restores_url_encoded_special_characters_exactly(self):
+        request_body = "body&part=value%2B+ space 中文"
+        cookie = "session=fake&mode=a=b%+ 空格"
+        environment = {
+            "EHI_CONFIG": urlencode(
+                {**VALID_FIELDS, "request_body": request_body, "cookie": cookie}
+            )
+        }
+
+        config = EhiConfig.from_env(environment)
+
+        self.assertEqual(config.request_body, request_body)
+        self.assertEqual(config.cookie, cookie)
 
     def test_empty_optional_cookie_maps_to_none(self):
-        environment = {**VALID_ENV, "EHI_COOKIE": ""}
+        self.assertIsNone(EhiConfig.from_env(VALID_ENV).cookie)
 
-        self.assertIsNone(EhiConfig.from_env(environment).cookie)
+    def test_missing_or_empty_aggregate_config_fails_with_name_only(self):
+        for environment in ({}, {"EHI_CONFIG": ""}):
+            with self.subTest(environment=environment):
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env(environment)
 
-    def test_preserves_required_values_verbatim(self):
-        environment = {**VALID_ENV, "EHI_REQUEST_BODY": "  fake body  "}
+                self.assertEqual(str(context.exception), "缺少环境变量: EHI_CONFIG")
 
-        self.assertEqual(EhiConfig.from_env(environment).request_body, "  fake body  ")
+    def test_rejects_malformed_percent_escape_with_sanitized_error(self):
+        for malformed in ("%", "%2", "%GG", "%2G"):
+            with self.subTest(malformed=malformed):
+                environment = {"EHI_CONFIG": VALID_CONFIG + malformed}
 
-    def test_each_missing_or_empty_required_value_fails_with_name_only(self):
-        for name in EhiConfig.REQUIRED_ENV:
-            for case in ("missing", "empty"):
-                with self.subTest(name=name, case=case):
-                    environment = dict(VALID_ENV)
-                    if case == "missing":
-                        del environment[name]
-                    else:
-                        environment[name] = ""
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env(environment)
 
-                    with self.assertRaises(ConfigError) as context:
-                        EhiConfig.from_env(environment)
-
-                    self.assertEqual(str(context.exception), f"缺少环境变量: {name}")
-                    self.assertNotIn("fake-", str(context.exception))
+                self.assertEqual(str(context.exception), "EHI_CONFIG URL 编码无效")
+                self.assertIsNone(context.exception.__cause__)
 
     def test_configuration_is_frozen(self):
         config = EhiConfig.from_env(VALID_ENV)
@@ -112,7 +125,13 @@ class EhiRequestTests(unittest.TestCase):
         )
 
     def test_adds_cookie_only_when_configured(self):
-        config = EhiConfig.from_env({**VALID_ENV, "EHI_COOKIE": "session=fake-cookie"})
+        config = EhiConfig.from_env(
+            {
+                "EHI_CONFIG": urlencode(
+                    {**VALID_FIELDS, "cookie": "session=fake-cookie"}
+                )
+            }
+        )
 
         perform_checkin(config, self.session)
 
@@ -198,7 +217,11 @@ class EhiMainTests(unittest.TestCase):
         self.assertIn(f"Result 长度={len(ciphertext)}", output)
         self.assertIn(hashlib.sha256(ciphertext.encode()).hexdigest(), output)
         self.assertIn("业务结果仍需 App 验证", output)
-        for secret in (*VALID_ENV.values(), ciphertext):
+        for secret in (
+            VALID_CONFIG,
+            *(value for value in VALID_FIELDS.values() if value),
+            ciphertext,
+        ):
             self.assertNotIn(secret, output)
         session_class.return_value.__enter__.assert_called_once_with()
         session_class.return_value.__exit__.assert_called_once_with(None, None, None)
@@ -217,7 +240,10 @@ class EhiMainTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("网络请求失败: Timeout", output)
         self.assertNotIn("leaked", output)
-        for secret in VALID_ENV.values():
+        for secret in (
+            VALID_CONFIG,
+            *(value for value in VALID_FIELDS.values() if value),
+        ):
             self.assertNotIn(secret, output)
         session_class.return_value.__enter__.assert_called_once_with()
         session_class.return_value.__exit__.assert_called_once()
