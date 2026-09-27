@@ -86,28 +86,60 @@
 POST https://app.1hai.cn/SignCenter/UserAssets/SignIn
 ```
 
-将同一次请求的字段分别保存为 GitHub Actions repository secrets：
+将同一次请求的字段组合为一个 URL 编码键值串，并保存为 GitHub Actions repository secret `EHI_CONFIG`：
 
-| Secret | 抓包字段 |
-|---|---|
-| `EHI_TOKEN` | 请求头 `Token` |
-| `EHI_APP_IDENTITY` | 请求头 `AppIdentity` |
-| `EHI_AUTHORIZATION` | 请求头 `Authorization` |
-| `EHI_CONTENT_MD5` | 请求头 `ehiContent-MD5` |
-| `EHI_NONCESTR` | 请求头 `noncestr` |
-| `EHI_REQUEST_ROOT_ID` | 请求头 `x-ms-request-root-id` |
-| `EHI_REQUEST_BODY` | 未修改的原始请求体 |
-| `EHI_COOKIE` | 请求头 `Cookie`，可选 |
+```text
+token=...&app_identity=...&authorization=...&content_md5=...&noncestr=...&request_root_id=...&request_body=...&cookie=...
+```
 
-这些字段必须来自同一次请求，不能只更新其中一部分。不要把真实值写入仓库、Issue 或 Actions 日志。已经公开的凭据应先通过重新登录轮换，再捕获新的整组请求字段用于正式部署。
+| 配置键 | 抓包字段 | 规则 |
+|---|---|---|
+| `token` | 请求头 `Token` | 必填 |
+| `app_identity` | 请求头 `AppIdentity` | 必填 |
+| `authorization` | 请求头 `Authorization` | 必填 |
+| `content_md5` | 请求头 `ehiContent-MD5` | 必填 |
+| `noncestr` | 请求头 `noncestr` | 必填 |
+| `request_root_id` | 请求头 `x-ms-request-root-id` | 必填 |
+| `request_body` | 未修改的原始请求体 | 必填 |
+| `cookie` | 请求头 `Cookie` | 键必填，值可为空 |
+
+在本地运行以下命令生成配置。它会无回显地依次提示全部 8 个字段，只向终端输出一行 URL 编码结果，不会写入文件：
+
+```bash
+python - <<'PY'
+from getpass import getpass
+from urllib.parse import urlencode
+
+fields = (
+    ("token", "Token"),
+    ("app_identity", "AppIdentity"),
+    ("authorization", "Authorization"),
+    ("content_md5", "ehiContent-MD5"),
+    ("noncestr", "noncestr"),
+    ("request_root_id", "x-ms-request-root-id"),
+    ("request_body", "原始请求体"),
+    ("cookie", "Cookie（可留空）"),
+)
+values = {key: getpass(f"{label}: ") for key, label in fields}
+print(urlencode(values))
+PY
+```
+
+- 全部字段必须来自同一个 `SignIn` 请求，不能只更新其中一部分。
+- 将生成的一整行复制为 Repository Secret `EHI_CONFIG` 的值。
+- 切勿把抓包值粘贴到仓库文件、Issues、日志或聊天中。已经公开的凭据应先通过重新登录轮换。
+- `cookie` 键必须存在；首次无 Cookie 测试时将它的值留空。
+- 轮换凭据时，重新生成并替换整个 `EHI_CONFIG`。
+- 现有部署应先创建 `EHI_CONFIG`，手动运行工作流并在 App 中验证结果，然后删除原有的八个 repository secrets。
+- 脚本不会读取旧 Secrets，也没有旧配置回退逻辑。
 
 ### 运行与验证
 
 - `.github/workflows/ehighCheck.yml` 计划每天北京时间 09:17 运行，也支持手动执行。
 - 首次配置后先手动运行工作流，再打开一嗨 App 确认当天已签到且积分增加。
 - HTTP 2xx 和非空加密 `Result` 只表示请求被服务端接受。脚本无法解密业务响应，因此这不能证明签到成功或积分到账。
-- 首次测试先不配置 `EHI_COOKIE`；如果人工验证失败，再补充同一次抓包请求的 Cookie。
-- 工作流失败或 App 未显示签到时，重新登录并捕获一组完整的新请求，然后一起更新所有 `EHI_*` Secrets。
+- 首次测试时将 `EHI_CONFIG` 中的 `cookie` 值留空；如果人工验证失败，再使用同一次抓包请求的 Cookie 重新生成整个配置。
+- 工作流失败或 App 未显示签到时，重新登录并捕获一组完整的新请求，然后重新生成并替换整个 `EHI_CONFIG`。
 - GitHub Actions 定时任务可能延迟或丢失，重要日期可在 Actions 页面检查运行记录。
 
 ## 文件结构
