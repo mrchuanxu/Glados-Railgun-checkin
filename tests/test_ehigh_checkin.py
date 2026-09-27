@@ -90,23 +90,34 @@ class EhiConfigTests(unittest.TestCase):
                     if value:
                         self.assertNotIn(value, str(context.exception))
 
-    def test_unknown_key_reports_first_sorted_name_without_value(self):
-        raw_config = urlencode(
-            {
-                **VALID_FIELDS,
-                "z_unknown": "z-sensitive-value",
-                "a_unknown": "a-sensitive-value",
-            }
+    def test_unknown_key_is_hidden_with_its_value(self):
+        name = "lowercase_secret_key"
+        value = "unknown-sensitive-value"
+        raw_config = urlencode({**VALID_FIELDS, name: value})
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "未知配置键")
+        self.assertNotIn(name, str(context.exception))
+        self.assertNotIn(value, str(context.exception))
+
+    def test_duplicate_unknown_key_is_hidden_with_its_values(self):
+        name = "lowercase_secret_key"
+        raw_config = (
+            f"{VALID_CONFIG}&{name}=first-sensitive-value"
+            f"&{name}=second-sensitive-value"
         )
 
         with self.assertRaises(ConfigError) as context:
             EhiConfig.from_env({"EHI_CONFIG": raw_config})
 
-        self.assertEqual(str(context.exception), "未知配置键: a_unknown")
-        self.assertNotIn("a-sensitive-value", str(context.exception))
-        self.assertNotIn("z-sensitive-value", str(context.exception))
+        self.assertEqual(str(context.exception), "未知配置键")
+        self.assertNotIn(name, str(context.exception))
+        self.assertNotIn("first-sensitive-value", str(context.exception))
+        self.assertNotIn("second-sensitive-value", str(context.exception))
 
-    def test_duplicate_key_is_rejected_before_other_validation(self):
+    def test_unknown_key_is_rejected_before_known_duplicate(self):
         fields = {
             key: value for key, value in VALID_FIELDS.items() if key != "authorization"
         }
@@ -118,7 +129,8 @@ class EhiConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError) as context:
             EhiConfig.from_env({"EHI_CONFIG": raw_config})
 
-        self.assertEqual(str(context.exception), "重复配置键: token")
+        self.assertEqual(str(context.exception), "未知配置键")
+        self.assertNotIn("z_unknown", str(context.exception))
         self.assertNotIn("duplicate-sensitive-value", str(context.exception))
         self.assertNotIn("unknown-sensitive-value", str(context.exception))
 
@@ -131,7 +143,8 @@ class EhiConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError) as context:
             EhiConfig.from_env({"EHI_CONFIG": raw_config})
 
-        self.assertEqual(str(context.exception), "未知配置键: z_unknown")
+        self.assertEqual(str(context.exception), "未知配置键")
+        self.assertNotIn("z_unknown", str(context.exception))
         self.assertNotIn("unknown-sensitive-value", str(context.exception))
 
     def test_missing_key_reports_first_sorted_name_before_empty_value(self):
@@ -362,6 +375,33 @@ class EhiFailureTests(unittest.TestCase):
 
 
 class EhiMainTests(unittest.TestCase):
+    @patch("ehigh_checkin.requests.Session")
+    def test_unknown_config_keys_are_not_logged_or_requested(self, session_class):
+        name = "lowercase_secret_key"
+        configs = (
+            urlencode({**VALID_FIELDS, name: "single-sensitive-value"}),
+            (
+                f"{VALID_CONFIG}&{name}=first-sensitive-value"
+                f"&{name}=second-sensitive-value"
+            ),
+        )
+        for aggregate_secret in configs:
+            with self.subTest(aggregate_secret=aggregate_secret):
+                with patch.dict(
+                    "os.environ", {"EHI_CONFIG": aggregate_secret}, clear=True
+                ):
+                    with self.assertLogs("ehigh_checkin", level="ERROR") as captured:
+                        exit_code = main()
+
+                output = "\n".join(captured.output)
+                self.assertEqual(exit_code, 1)
+                self.assertIn("未知配置键", output)
+                self.assertNotIn(aggregate_secret, output)
+                self.assertNotIn(name, output)
+                self.assertNotIn("sensitive-value", output)
+
+        session_class.assert_not_called()
+
     @patch("ehigh_checkin.requests.Session")
     def test_unsafe_config_keys_are_not_logged_or_requested(self, session_class):
         unsafe_names = (

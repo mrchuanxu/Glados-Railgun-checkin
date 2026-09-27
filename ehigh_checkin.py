@@ -75,16 +75,15 @@ class EhiConfig:
         if any(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None for key, _ in pairs):
             raise ConfigError("配置键无效")
 
-        seen = set()
-        for key, _ in pairs:
-            if key in seen:
-                raise ConfigError(f"重复配置键: {key}")
-            seen.add(key)
+        seen = {key for key, _ in pairs}
+        if seen - cls.REQUIRED_KEYS:
+            raise ConfigError("未知配置键")
 
-        unknown_keys = seen - cls.REQUIRED_KEYS
-        if unknown_keys:
-            name = sorted(unknown_keys)[0]
-            raise ConfigError(f"未知配置键: {name}")
+        unique_keys = set()
+        for key, _ in pairs:
+            if key in unique_keys:
+                raise ConfigError(f"重复配置键: {key}")
+            unique_keys.add(key)
 
         missing_keys = cls.REQUIRED_KEYS - seen
         if missing_keys:
