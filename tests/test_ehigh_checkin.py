@@ -182,6 +182,54 @@ class EhiConfigTests(unittest.TestCase):
                 self.assertEqual(str(context.exception), "EHI_CONFIG URL 编码无效")
                 self.assertNotIn(raw_config, str(context.exception))
                 self.assertIsNone(context.exception.__cause__)
+                self.assertIsNone(context.exception.__context__)
+
+    def test_invalid_utf8_buffer_is_not_retained_by_public_exception(self):
+        raw_config = f"{VALID_CONFIG}&broken=%FF"
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        error = context.exception
+        self.assertEqual(str(error), "EHI_CONFIG URL 编码无效")
+        self.assertNotIn("FF", str(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+
+    def test_unsafe_keys_are_rejected_without_name_or_value(self):
+        unsafe_names = (
+            "line\nnewline-secret",
+            "line\rcarriage-secret",
+            "密钥",
+            "a" * 65,
+            "SECRET_LOOKING_KEY",
+        )
+        for name in unsafe_names:
+            with self.subTest(name=name):
+                raw_config = urlencode({**VALID_FIELDS, name: "unsafe-value-secret"})
+
+                with self.assertRaises(ConfigError) as context:
+                    EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+                message = str(context.exception)
+                self.assertEqual(message, "配置键无效")
+                self.assertNotIn(name, message)
+                self.assertNotIn("unsafe-value-secret", message)
+                self.assertNotIn("\n", message)
+                self.assertNotIn("\r", message)
+
+    def test_unsafe_key_is_rejected_before_safe_duplicate(self):
+        raw_config = (
+            f"{VALID_CONFIG}&token=duplicate-sensitive-value"
+            "&unsafe%0Akey=unsafe-sensitive-value"
+        )
+
+        with self.assertRaises(ConfigError) as context:
+            EhiConfig.from_env({"EHI_CONFIG": raw_config})
+
+        self.assertEqual(str(context.exception), "配置键无效")
+        self.assertNotIn("unsafe", str(context.exception))
+        self.assertNotIn("sensitive", str(context.exception))
 
     def test_rejects_malformed_percent_escape_with_sanitized_error(self):
         for malformed in ("%", "%2", "%GG", "%2G"):
@@ -284,12 +332,19 @@ class EhiFailureTests(unittest.TestCase):
         self.assertNotIn("fake-token", str(context.exception))
         self.assertNotIn("leaked", str(context.exception))
         self.assertIsNone(context.exception.__cause__)
+        self.assertIsNone(context.exception.__context__)
 
-    def test_rejects_invalid_json(self):
-        self.response.json.side_effect = json.JSONDecodeError("bad", "x", 0)
+    def test_rejects_invalid_json_without_retaining_ciphertext(self):
+        ciphertext = "ciphertext-secret-sentinel"
+        self.response.json.side_effect = json.JSONDecodeError("bad", ciphertext, 0)
 
-        with self.assertRaisesRegex(CheckinError, "响应不是有效 JSON"):
+        with self.assertRaisesRegex(CheckinError, "响应不是有效 JSON") as context:
             perform_checkin(self.config, self.session)
+
+        error = context.exception
+        self.assertNotIn(ciphertext, str(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
 
     def test_rejects_non_object_json(self):
         self.response.json.return_value = ["fake-ciphertext"]
@@ -307,6 +362,38 @@ class EhiFailureTests(unittest.TestCase):
 
 
 class EhiMainTests(unittest.TestCase):
+    @patch("ehigh_checkin.requests.Session")
+    def test_unsafe_config_keys_are_not_logged_or_requested(self, session_class):
+        unsafe_names = (
+            "line\nnewline-log-secret",
+            "line\rcarriage-log-secret",
+            "密钥",
+            "a" * 65,
+            "SECRET_LOOKING_KEY",
+        )
+        for name in unsafe_names:
+            with self.subTest(name=name):
+                aggregate_secret = urlencode(
+                    {**VALID_FIELDS, name: "unsafe-value-secret"}
+                )
+
+                with patch.dict(
+                    "os.environ", {"EHI_CONFIG": aggregate_secret}, clear=True
+                ):
+                    with self.assertLogs("ehigh_checkin", level="ERROR") as captured:
+                        exit_code = main()
+
+                output = "\n".join(captured.output)
+                self.assertEqual(exit_code, 1)
+                self.assertIn("配置键无效", output)
+                self.assertNotIn(aggregate_secret, output)
+                self.assertNotIn(name, output)
+                self.assertNotIn("unsafe-value-secret", output)
+                self.assertNotIn("\n", output)
+                self.assertNotIn("\r", output)
+
+        session_class.assert_not_called()
+
     @patch("ehigh_checkin.requests.Session")
     def test_invalid_duplicate_config_is_not_logged_or_requested(self, session_class):
         aggregate_secret = f"{VALID_CONFIG}&token=duplicate-sensitive-value"

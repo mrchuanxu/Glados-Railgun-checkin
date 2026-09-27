@@ -58,6 +58,7 @@ class EhiConfig:
         if re.search(r"%(?![0-9A-Fa-f]{2})", encoded):
             raise ConfigError("EHI_CONFIG URL 编码无效")
 
+        parse_failed = False
         try:
             pairs = parse_qsl(
                 encoded,
@@ -67,7 +68,12 @@ class EhiConfig:
                 errors="strict",
             )
         except (UnicodeDecodeError, ValueError):
-            raise ConfigError("EHI_CONFIG URL 编码无效") from None
+            parse_failed = True
+        if parse_failed:
+            raise ConfigError("EHI_CONFIG URL 编码无效")
+
+        if any(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None for key, _ in pairs):
+            raise ConfigError("配置键无效")
 
         seen = set()
         for key, _ in pairs:
@@ -131,6 +137,7 @@ def _build_headers(config: EhiConfig) -> dict[str, str]:
 
 
 def perform_checkin(config: EhiConfig, session: Any) -> CheckinOutcome:
+    request_error_name = None
     try:
         response = session.post(
             CHECKIN_URL,
@@ -139,15 +146,20 @@ def perform_checkin(config: EhiConfig, session: Any) -> CheckinOutcome:
             timeout=(10, 30),
         )
     except requests.RequestException as error:
-        raise CheckinError(f"网络请求失败: {type(error).__name__}") from None
+        request_error_name = type(error).__name__
+    if request_error_name is not None:
+        raise CheckinError(f"网络请求失败: {request_error_name}")
 
     if not 200 <= response.status_code < 300:
         raise CheckinError(f"HTTP 状态异常: {response.status_code}")
 
+    invalid_json = False
     try:
         payload = response.json()
-    except (json.JSONDecodeError, ValueError) as error:
-        raise CheckinError("响应不是有效 JSON") from error
+    except (json.JSONDecodeError, ValueError):
+        invalid_json = True
+    if invalid_json:
+        raise CheckinError("响应不是有效 JSON")
 
     if not isinstance(payload, dict):
         raise CheckinError("响应 JSON 不是对象")
