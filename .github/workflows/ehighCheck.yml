@@ -33,11 +33,4 @@ jobs:
     - name: Run 1hai checkin
       run: python ehigh_checkin.py
       env:
-        EHI_TOKEN: ${{ secrets.EHI_TOKEN }}
-        EHI_APP_IDENTITY: ${{ secrets.EHI_APP_IDENTITY }}
-        EHI_AUTHORIZATION: ${{ secrets.EHI_AUTHORIZATION }}
-        EHI_CONTENT_MD5: ${{ secrets.EHI_CONTENT_MD5 }}
-        EHI_NONCESTR: ${{ secrets.EHI_NONCESTR }}
-        EHI_REQUEST_ROOT_ID: ${{ secrets.EHI_REQUEST_ROOT_ID }}
-        EHI_REQUEST_BODY: ${{ secrets.EHI_REQUEST_BODY }}
-        EHI_COOKIE: ${{ secrets.EHI_COOKIE }}
+        EHI_CONFIG: ${{ secrets.EHI_CONFIG }}

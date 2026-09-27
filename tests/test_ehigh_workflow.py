@@ -4,7 +4,8 @@ from pathlib import Path
 
 
 WORKFLOW_PATH = Path(__file__).parents[1] / ".github" / "workflows" / "ehighCheck.yml"
-EXPECTED_SECRETS = {
+EXPECTED_SECRET = "EHI_CONFIG"
+LEGACY_SECRETS = {
     "EHI_TOKEN",
     "EHI_APP_IDENTITY",
     "EHI_AUTHORIZATION",
@@ -103,7 +104,7 @@ class EhighWorkflowTests(unittest.TestCase):
     def test_installs_requests_with_current_python(self):
         self.assertIn("      run: python -m pip install requests\n", self.workflow)
 
-    def test_only_checkin_step_receives_exact_ehigh_secrets(self):
+    def test_only_checkin_step_receives_single_ehigh_secret(self):
         checkin_job = extract_indented_block(self.workflow, "checkin", 2)
         job_env = extract_indented_block(checkin_job, "env", 4)
         steps = extract_named_steps(self.workflow)
@@ -115,24 +116,17 @@ class EhighWorkflowTests(unittest.TestCase):
             for line in checkin_env.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        env_entries = [
-            re.fullmatch(r"        ([A-Z][A-Z0-9_]*): (.+)", line)
-            for line in env_lines
-        ]
-        expected_env = {
-            name: "${{ secrets." + name + " }}" for name in EXPECTED_SECRETS
-        }
 
-        self.assertTrue(all(env_entries))
-        self.assertEqual(len(env_entries), len(expected_env))
         self.assertEqual(
-            {entry.group(1): entry.group(2) for entry in env_entries},
-            expected_env,
+            env_lines,
+            [f"        {EXPECTED_SECRET}: ${{{{ secrets.{EXPECTED_SECRET} }}}}"],
         )
         self.assertNotIn("secrets.", job_env)
         for name, step in steps.items():
             if name != "Run 1hai checkin":
                 self.assertNotIn("secrets.", step)
+        for legacy_name in LEGACY_SECRETS:
+            self.assertNotIn(legacy_name, self.workflow)
 
 
 if __name__ == "__main__":
