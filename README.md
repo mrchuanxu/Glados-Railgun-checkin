@@ -161,6 +161,7 @@ PY
 
 - **2026-01**: 重构代码，添加log输出方便定位，支持新版网址，支持配置积分兑换策略。
 - **2026-04**: 优化代码逻辑，优化日志输出，支持[新版域名](https://railgun.info) ，在 GLADOS_COOKIES 中添加新版域名下的 cookies 即可使用。
+- **2026-11**: GLaDOS 主域名切换为 [glados.network](https://glados.network)，签到、状态、积分和兑换请求均使用新域名，并继续支持 `railgun.info`。旧 `glados.cloud` 域名的运行状态不会迁移到新域名。
 
 
 ## 问题排查与定位

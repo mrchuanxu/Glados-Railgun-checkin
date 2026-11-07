@@ -8,6 +8,12 @@ from state_store import StateStore
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_domain_change_produces_a_new_task_id(self):
+        old_domain_id = StateStore.task_id("cookie-a", "glados.cloud")
+        new_domain_id = StateStore.task_id("cookie-a", "glados.network")
+
+        self.assertNotEqual(old_domain_id, new_domain_id)
+
     def test_cookie_and_domain_combinations_have_isolated_ids(self):
         ids = {
             StateStore.task_id("cookie-a", "glados.cloud"),

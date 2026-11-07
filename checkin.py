@@ -129,7 +129,7 @@ class Config:
     DEFAULT_VERBOSE = False
 
     """默认域名"""
-    DOMAINS = ["glados.cloud", "railgun.info"]
+    DOMAINS = ["glados.network", "railgun.info"]
 
     def __init__(self):
         self.push_key: str = ""
